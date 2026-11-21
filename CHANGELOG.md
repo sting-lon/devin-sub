@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.2] - 2026-11-21
+
+- Republished `0.2.1` to npm to fix missing tarball propagation.
+
 ## [0.2.1] - 2026-11-21
 
 - Styled the OAuth callback page with a dark layout and embedded Devin logo.
