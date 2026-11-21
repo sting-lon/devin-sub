@@ -1,0 +1,41 @@
+{
+  "name": "devin-sub",
+  "version": "0.1.1",
+  "type": "module",
+  "description": "Devin subscription provider for Pi",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.0",
+    "typescript": "5.7.0"
+  },
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "devin",
+    "provider",
+    "oauth",
+    "connect-rpc"
+  ],
+  "files": [
+    "src/*.ts",
+    "README.md",
+    "tsconfig.json",
+    "assets/*.png"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sting-lon/devin-sub.git"
+  },
+  "homepage": "https://github.com/sting-lon/devin-sub#readme",
+  "bugs": {
+    "url": "https://github.com/sting-lon/devin-sub/issues"
+  }
+}

@@ -1,0 +1,4 @@
+node_modules/
+*.tgz
+models-cache.json
+.DS_Store
