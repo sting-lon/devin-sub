@@ -6,7 +6,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/sting-lon/devin-sub/main/assets/devin-logo.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -27,6 +28,7 @@
   "files": [
     "src/*.ts",
     "README.md",
+    "CHANGELOG.md",
     "tsconfig.json",
     "assets/*.png"
   ],

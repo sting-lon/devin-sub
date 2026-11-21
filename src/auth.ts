@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { OAuthCredential, ProviderAuthInteraction } from "@earendil-works/pi-ai";
 import { fetchCatalog, writeCatalogCache } from "./catalog";
@@ -89,8 +90,111 @@ async function exchangeCode(
 	return { token: payload.token, webappHost: payload.webapp_host };
 }
 
-function callbackPage(title: string, message: string): string {
-	return `<h1>Devin - ${title}</h1><p>${message}</p>`;
+let cachedLogoMarkup: string | undefined;
+
+function devinLogoMarkup(): string {
+	if (cachedLogoMarkup !== undefined) return cachedLogoMarkup;
+	try {
+		const png = readFileSync(new URL("../assets/devin-logo-white.png", import.meta.url));
+		cachedLogoMarkup = `<img class="logo" src="data:image/png;base64,${png.toString("base64")}" alt="Devin" />`;
+	} catch {
+		cachedLogoMarkup =
+			`<div class="logo" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">` +
+			`<rect width="64" height="64" rx="16" fill="#18181b"/>` +
+			`<path d="M20 18h13c9.4 0 16 6.1 16 14s-6.6 14-16 14H20V18zm7 6v16h6c5.4 0 9-3.3 9-8s-3.6-8-9-8h-6z" fill="#fafafa"/>` +
+			`</svg></div>`;
+	}
+	return cachedLogoMarkup;
+}
+
+function escapeHtml(value: string): string {
+	return value
+		.replaceAll("&", "&amp;")
+		.replaceAll("<", "&lt;")
+		.replaceAll(">", "&gt;")
+		.replaceAll('"', "&quot;")
+		.replaceAll("'", "&#39;");
+}
+
+function callbackPage(title: string, message: string, details?: string): string {
+	const safeTitle = escapeHtml(title);
+	const safeMessage = escapeHtml(message);
+	const detailsBlock = details ? `<div class="details">${escapeHtml(details)}</div>` : "";
+	return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${safeTitle} - Devin</title>
+  <style>
+    :root {
+      --text: #fafafa;
+      --text-dim: #a1a1aa;
+      --page-bg: #09090b;
+      --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+    * { box-sizing: border-box; }
+    html { color-scheme: dark; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: var(--page-bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      text-align: center;
+    }
+    main {
+      width: 100%;
+      max-width: 560px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    .logo {
+      width: 72px;
+      height: 72px;
+      display: block;
+      object-fit: contain;
+      margin-bottom: 24px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 28px;
+      line-height: 1.15;
+      font-weight: 650;
+      color: var(--text);
+    }
+    p {
+      margin: 0;
+      line-height: 1.7;
+      color: var(--text-dim);
+      font-size: 15px;
+    }
+    .details {
+      margin-top: 16px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      color: var(--text-dim);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    ${devinLogoMarkup()}
+    <h1>${safeTitle}</h1>
+    <p>${safeMessage}</p>
+    ${detailsBlock}
+  </main>
+</body>
+</html>`;
 }
 
 async function startCallbackServer(expectedState: string, signal?: AbortSignal): Promise<CallbackServer> {
@@ -132,12 +236,14 @@ async function startCallbackServer(expectedState: string, signal?: AbortSignal):
 
 				if (error || !code || returnedState !== expectedState) {
 					const reason = error ?? (returnedState !== expectedState ? "State mismatch" : "Missing code");
-					response.end(callbackPage("login failed", "Return to Pi and try /login devin again."));
+					response.end(callbackPage("Authentication failed", "Return to Pi and run /login devin again.", reason));
 					finish(() => reject(new Error(reason)));
 					return;
 				}
 
-				response.end(callbackPage("Connected", "You can close this tab and return to Pi."));
+				response.end(
+					callbackPage("Authentication successful", "Signed in to Devin for Pi. You can close this tab and return to Pi."),
+				);
 				finish(() => resolve(code));
 			});
 		});
