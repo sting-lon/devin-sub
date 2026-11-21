@@ -1,7 +1,7 @@
-import { createProvider } from "@earendil-works/pi-ai/compat";
-import type { OAuthCredential, SimpleStreamOptions, StreamOptions } from "@earendil-works/pi-ai/compat";
+import { createProvider } from "@earendil-works/pi-ai";
+import type { OAuthCredential, SimpleStreamOptions, StreamOptions } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { interactionCallbacks, loginDevin } from "./auth";
+import { loginDevin } from "./auth";
 import { fetchModels, seedModels } from "./catalog";
 import { resetSessionState, streamDevin } from "./chat";
 import { PROVIDER_ID, UPSTREAM_BASE, normalizeToken } from "./devin";
@@ -17,8 +17,9 @@ export default function devinSubscriptionProvider(pi: ExtensionAPI): void {
 		auth: {
 			oauth: {
 				name: "Devin",
+				loginLabel: "Sign in with Devin",
 				isSubscription: true,
-				login: async (interaction) => ({ type: "oauth", ...(await loginDevin(interactionCallbacks(interaction))) }),
+				login: loginDevin,
 				refresh: (credential: OAuthCredential) => Promise.resolve(credential),
 				toAuth: (credential) => Promise.resolve({ apiKey: normalizeToken(credential.access) }),
 			},

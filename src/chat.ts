@@ -8,13 +8,13 @@ import type {
 	SimpleStreamOptions,
 	ToolCall,
 	TranscriptContext,
-} from "@earendil-works/pi-ai/compat";
+} from "@earendil-works/pi-ai";
 import {
 	collapseSystemMessages,
 	createAssistantMessageEventStream,
 	getCurrentSystemPrompt,
 	getCurrentTools,
-} from "@earendil-works/pi-ai/compat";
+} from "@earendil-works/pi-ai";
 import { resolveModelUid } from "./catalog";
 import {
 	type DevinPrompt,
@@ -26,10 +26,10 @@ import {
 	toPrompts,
 } from "./transcript";
 import {
-	CHAT_URL,
 	CONNECT_END_STREAM_FLAG,
 	CONNECT_GZIP_FLAG,
 	DEFAULT_MAX_TOKENS,
+	UPSTREAM_BASE,
 	buildClientMetadata,
 	normalizeToken,
 	parseConnectTrailer,
@@ -45,17 +45,23 @@ import {
 	wrapConnectFrame,
 } from "./devin";
 
+const CHAT_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
+
 const PromptField = {
 	messageId: 1,
 	source: 2,
 	content: 3,
 	toolCalls: 6,
 	toolCallId: 7,
+	cacheControl: 8,
 	images: 10,
 	thinking: 11,
 	signature: 12,
 	signatureType: 18,
+	modelUid: 22,
 } as const;
+
+const CACHE_CONTROL_EPHEMERAL = pbVarint(1, 1);
 
 const ToolCallPromptField = { id: 1, name: 2, arguments: 3 } as const;
 const ImageField = { data: 1, mimeType: 2 } as const;
@@ -71,6 +77,7 @@ const RequestField = {
 	cascadeId: 16,
 	enabled: 20,
 	modelUid: 21,
+	sessionUuid: 22,
 } as const;
 
 const ToolDefinitionField = { name: 1, description: 2, parameters: 3 } as const;
@@ -97,18 +104,22 @@ interface ChatRequest {
 	systemPrompt: string;
 	prompts: DevinPrompt[];
 	tools: DevinToolDefinition[];
-	sessionId: string;
+	threadId: string;
+	cascadeId: string;
+	sessionUuid: string;
 	turnIndex: number;
 	maxTokens: number;
 	temperature?: number;
+	topP?: number;
+	topK?: number;
 }
 
 function encodePrompt(prompt: DevinPrompt): Buffer {
 	const parts: Buffer[] = [
 		pbString(PromptField.messageId, prompt.messageId),
 		pbVarint(PromptField.source, prompt.source),
-		pbString(PromptField.content, prompt.content),
 	];
+	if (prompt.content) parts.push(pbString(PromptField.content, prompt.content));
 
 	for (const call of prompt.toolCalls ?? []) {
 		const encoded = Buffer.concat([
@@ -120,6 +131,7 @@ function encodePrompt(prompt: DevinPrompt): Buffer {
 	}
 
 	if (prompt.toolCallId) parts.push(pbString(PromptField.toolCallId, prompt.toolCallId));
+	if (prompt.cacheControl) parts.push(pbBytes(PromptField.cacheControl, CACHE_CONTROL_EPHEMERAL));
 
 	for (const image of prompt.images ?? []) {
 		const data = image.data.replace(DATA_URL_PREFIX, "").replace(WHITESPACE, "");
@@ -134,6 +146,7 @@ function encodePrompt(prompt: DevinPrompt): Buffer {
 	if (prompt.thinking) parts.push(pbString(PromptField.thinking, prompt.thinking));
 	if (prompt.signature) parts.push(pbString(PromptField.signature, prompt.signature));
 	if (prompt.signatureType) parts.push(pbString(PromptField.signatureType, prompt.signatureType));
+	if (prompt.modelUid) parts.push(pbString(PromptField.modelUid, prompt.modelUid));
 
 	return Buffer.concat(parts);
 }
@@ -154,8 +167,8 @@ function buildRequest(request: ChatRequest): Buffer {
 				pbVarint(Sampling.maxTokens, request.maxTokens),
 				pbVarint(Sampling.reservedTokens, SAMPLING_DEFAULTS.reservedTokens),
 				pbDouble(Sampling.temperature, request.temperature ?? SAMPLING_DEFAULTS.temperature),
-				pbVarint(Sampling.topK, SAMPLING_DEFAULTS.topK),
-				pbDouble(Sampling.topP, Math.fround(SAMPLING_DEFAULTS.topP)),
+				pbVarint(Sampling.topK, request.topK ?? SAMPLING_DEFAULTS.topK),
+				pbDouble(Sampling.topP, Math.fround(request.topP ?? SAMPLING_DEFAULTS.topP)),
 			]),
 		),
 	);
@@ -178,16 +191,17 @@ function buildRequest(request: ChatRequest): Buffer {
 		lastPrompt?.source === PROMPT_SOURCE_USER &&
 		(request.turnIndex === 0 || previousPrompt?.source !== PROMPT_SOURCE_USER);
 
-	const thread: Buffer[] = [pbString(ThreadField.sessionId, request.sessionId)];
+	const thread: Buffer[] = [pbString(ThreadField.sessionId, request.threadId)];
 	if (request.turnIndex > 0) thread.push(pbVarint(ThreadField.turnIndex, request.turnIndex));
 	thread.push(pbVarint(ThreadField.marker, THREAD_MARKER_VALUE));
 	if (startsUserTurn) thread.push(pbVarint(ThreadField.userTurnBoundary, USER_TURN_BOUNDARY_VALUE));
 
 	parts.push(
 		pbBytes(RequestField.thread, Buffer.concat(thread)),
-		pbString(RequestField.cascadeId, request.sessionId),
+		pbString(RequestField.cascadeId, request.cascadeId),
 		pbVarint(RequestField.enabled, REQUEST_ENABLED_VALUE),
 		pbString(RequestField.modelUid, request.modelUid),
+		pbString(RequestField.sessionUuid, request.sessionUuid),
 	);
 
 	return Buffer.concat(parts);
@@ -203,7 +217,7 @@ const ResponseField = {
 	signatureType: 21,
 } as const;
 
-const UsageField = { input: 2, output: 3, cacheWrite: 4, cacheRead: 5 } as const;
+const UsageField = { input: 2, output: 3, cacheWrite: 4, cacheRead: 5, responseModel: 9 } as const;
 const ToolCallDeltaField = { id: 1, name: 2, arguments: 3 } as const;
 const UpstreamStopReason = { incomplete: 1, maxTokens: 3, toolCalls: 10, contentFilter: 11 } as const;
 
@@ -218,6 +232,7 @@ interface FrameUsage {
 	completionTokens: number;
 	cachedTokens: number;
 	cacheWriteTokens: number;
+	responseModel?: string;
 }
 
 interface ParsedFrame {
@@ -267,12 +282,16 @@ function parseFrame(payload: Buffer): ParsedFrame {
 			toolCalls.push(delta);
 		} else if (field.field === ResponseField.usage) {
 			for (const entry of readFields(bytes)) {
-				if (entry.wire !== WIRE_VARINT) continue;
-				const value = Number(entry.value as bigint);
-				if (entry.field === UsageField.input) usage.promptTokens += value;
-				else if (entry.field === UsageField.output) usage.completionTokens = value;
-				else if (entry.field === UsageField.cacheWrite) usage.cacheWriteTokens += value;
-				else if (entry.field === UsageField.cacheRead) usage.cachedTokens = value;
+				if (entry.wire === WIRE_VARINT) {
+					const value = Number(entry.value as bigint);
+					if (entry.field === UsageField.input) usage.promptTokens += value;
+					else if (entry.field === UsageField.output) usage.completionTokens = value;
+					else if (entry.field === UsageField.cacheWrite) usage.cacheWriteTokens += value;
+					else if (entry.field === UsageField.cacheRead) usage.cachedTokens = value;
+				} else if (entry.wire === WIRE_BYTES && entry.field === UsageField.responseModel) {
+					const modelName = (entry.value as Buffer).toString("utf8");
+					if (modelName) usage.responseModel = modelName;
+				}
 			}
 		}
 	}
@@ -292,6 +311,7 @@ class ResponseAccumulator {
 	private started = false;
 	private textIndex = -1;
 	private thinkingIndex = -1;
+	private thinkingClosed = false;
 	private lastCallKey: string | undefined;
 	private stopReason: number | undefined;
 	private signature: string | undefined;
@@ -304,6 +324,7 @@ class ResponseAccumulator {
 
 	apply(frame: ParsedFrame): void {
 		if (frame.stopReason !== undefined) this.stopReason = frame.stopReason;
+		if (frame.usage.responseModel) this.output.responseModel = frame.usage.responseModel;
 		if (frame.signature) {
 			this.signature = frame.signature;
 			rememberSignature(frame.signature, frame.signatureType);
@@ -311,7 +332,14 @@ class ResponseAccumulator {
 		if (frame.thinking) this.appendThinking(frame.thinking);
 		if (frame.text) this.appendText(frame.text);
 		for (const delta of frame.toolCalls) this.applyToolCallDelta(delta);
-		if (frame.usage.promptTokens || frame.usage.completionTokens) this.applyUsage(frame.usage);
+		if (
+			frame.usage.promptTokens ||
+			frame.usage.completionTokens ||
+			frame.usage.cachedTokens ||
+			frame.usage.cacheWriteTokens
+		) {
+			this.applyUsage(frame.usage);
+		}
 	}
 
 	finish(): FinalStopReason {
@@ -351,6 +379,7 @@ class ResponseAccumulator {
 
 	private appendText(delta: string): void {
 		this.ensureStarted();
+		this.closeThinking();
 		if (this.textIndex === -1) {
 			this.textIndex = this.output.content.length;
 			this.output.content.push({ type: "text", text: "" });
@@ -363,6 +392,7 @@ class ResponseAccumulator {
 
 	private applyToolCallDelta(delta: ToolCallDelta): void {
 		this.ensureStarted();
+		this.closeThinking();
 		const key = delta.id || (delta.name ? `name:${delta.name}` : this.lastCallKey) || randomUUID();
 		const active = this.activeCalls.get(key) ?? this.startToolCall(key, delta);
 		if (delta.name && !active.call.name) active.call.name = delta.name;
@@ -395,10 +425,10 @@ class ResponseAccumulator {
 	}
 
 	private applyUsage(usage: FrameUsage): void {
-		this.output.usage.input = usage.promptTokens;
-		this.output.usage.output = usage.completionTokens;
-		this.output.usage.cacheRead = usage.cachedTokens;
-		this.output.usage.cacheWrite = usage.cacheWriteTokens;
+		if (usage.promptTokens) this.output.usage.input = usage.promptTokens;
+		if (usage.completionTokens) this.output.usage.output = usage.completionTokens;
+		if (usage.cachedTokens) this.output.usage.cacheRead = usage.cachedTokens;
+		if (usage.cacheWriteTokens) this.output.usage.cacheWrite = usage.cacheWriteTokens;
 		this.output.usage.totalTokens =
 			this.output.usage.input + this.output.usage.output + this.output.usage.cacheRead + this.output.usage.cacheWrite;
 	}
@@ -419,7 +449,9 @@ class ResponseAccumulator {
 	}
 
 	private closeThinking(): void {
-		if (this.thinkingIndex === -1) return;
+		if (this.thinkingIndex === -1 || this.thinkingClosed) return;
+		this.thinkingClosed = true;
+		this.attachSignature();
 		const block = this.output.content[this.thinkingIndex] as { thinking: string };
 		this.stream.push({
 			type: "thinking_end",
@@ -458,12 +490,35 @@ class ResponseAccumulator {
 	}
 }
 
+interface SessionState {
+	threadId: string;
+	cascadeId: string;
+	sessionUuid: string;
+	turnIndex: number;
+}
+
 let fallbackSessionId = randomUUID();
-const turnCounters = new Map<string, number>();
+const sessionStates = new Map<string, SessionState>();
+
+function nextSessionState(sessionKey: string): SessionState {
+	let state = sessionStates.get(sessionKey);
+	if (!state) {
+		state = {
+			threadId: sessionKey,
+			cascadeId: randomUUID(),
+			sessionUuid: randomUUID(),
+			turnIndex: 0,
+		};
+		sessionStates.set(sessionKey, state);
+	}
+	const current = { ...state };
+	state.turnIndex += 1;
+	return current;
+}
 
 export function resetSessionState(): void {
 	fallbackSessionId = randomUUID();
-	turnCounters.clear();
+	sessionStates.clear();
 	clearSignatures();
 }
 
@@ -477,17 +532,21 @@ interface StreamContext {
 }
 
 async function postChatRequest(context: StreamContext, body: Buffer, token: string): Promise<Response> {
+	const chatUrl = `${(context.model.baseUrl || UPSTREAM_BASE).replace(/\/+$/, "")}${CHAT_PATH}`;
 	const headers: Record<string, string> = {
+		...context.model.headers,
+		...context.options?.headers,
 		Authorization: `Basic ${token}-${token}`,
 		"Content-Type": "application/connect+proto",
 		"Connect-Protocol-Version": "1",
 		"connect-content-encoding": "gzip",
 		Accept: "*/*",
+		"Accept-Encoding": "gzip",
 		"Sentry-Trace": sentryTrace(),
 	};
 	let framed = wrapConnectFrame(body);
 
-	const instrumented = { url: CHAT_URL, headers, body: body.toString("base64"), encoding: "base64" as const };
+	const instrumented = { url: chatUrl, headers, body: body.toString("base64"), encoding: "base64" as const };
 	const replacement = (await context.options?.onPayload?.(instrumented, context.model)) as
 		| { body?: unknown; encoding?: string }
 		| undefined;
@@ -504,7 +563,7 @@ async function postChatRequest(context: StreamContext, body: Buffer, token: stri
 	}
 
 	const doFetch = context.options?.fetch ?? fetch;
-	const response = await doFetch(CHAT_URL, {
+	const response = await doFetch(chatUrl, {
 		method: "POST",
 		headers,
 		body: new Uint8Array(framed),
@@ -556,8 +615,7 @@ async function runStream(context: StreamContext): Promise<void> {
 	const token = normalizeToken(rawToken);
 
 	const sessionKey = context.options?.sessionId?.trim() || fallbackSessionId;
-	const turnIndex = turnCounters.get(sessionKey) ?? 0;
-	turnCounters.set(sessionKey, turnIndex + 1);
+	const session = nextSessionState(sessionKey);
 
 	const modelUid = resolveModelUid(context.model.id, context.options?.reasoning);
 	context.output.responseModel = modelUid;
@@ -569,16 +627,26 @@ async function runStream(context: StreamContext): Promise<void> {
 		parametersJson: JSON.stringify(tool.parameters ?? {}),
 	}));
 
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+	const maxOutputCap = context.model.maxTokens || DEFAULT_MAX_TOKENS;
+	const samplingParams = context.options?.samplingParams;
 	const body = buildRequest({
 		token,
 		modelUid,
 		systemPrompt: getCurrentSystemPrompt(transcript.messages) || "",
-		prompts: toPrompts(transcript, { provider: context.model.provider, id: context.model.id }),
+		prompts: toPrompts(transcript, { provider: context.model.provider, id: modelUid }),
 		tools,
-		sessionId: sessionKey,
-		turnIndex,
-		maxTokens: Math.min(context.options?.maxTokens ?? context.model.maxTokens ?? DEFAULT_MAX_TOKENS, DEFAULT_MAX_TOKENS),
-		temperature: context.options?.temperature,
+		threadId: session.threadId,
+		cascadeId: session.cascadeId,
+		sessionUuid: session.sessionUuid,
+		turnIndex: session.turnIndex,
+		maxTokens: Math.min(context.options?.maxTokens ?? maxOutputCap, maxOutputCap),
+		temperature: finiteNumber(samplingParams?.temperature) ?? context.options?.temperature,
+		topP: finiteNumber(samplingParams?.topP),
+		topK: finiteNumber(samplingParams?.topK),
 	});
 
 	const response = await postChatRequest(context, body, token);

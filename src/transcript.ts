@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ToolCall, TranscriptContext } from "@earendil-works/pi-ai/compat";
+import type { ToolCall, TranscriptContext } from "@earendil-works/pi-ai";
 
 export interface DevinImage {
 	data: string;
@@ -24,10 +24,12 @@ export interface DevinPrompt {
 	content: string;
 	toolCalls?: DevinToolCallPrompt[];
 	toolCallId?: string;
+	cacheControl?: boolean;
 	thinking?: string;
 	signature?: string;
 	signatureType?: string;
 	images?: DevinImage[];
+	modelUid?: string;
 }
 
 export interface ModelIdentity {
@@ -177,6 +179,7 @@ function appendAssistantPrompt(
 			thinking: thinking || undefined,
 			signature: signatureType ? signature : undefined,
 			signatureType,
+			modelUid: message.model || from?.id || undefined,
 		}),
 	);
 }
@@ -188,7 +191,12 @@ function appendToolResultPrompt(
 ): void {
 	const body = textOfContent(message.content).trim() || EMPTY_TOOL_OUTPUT;
 	const images = imagesOfContent(message.content);
-	const matchIndex = state.pendingCalls.findIndex((call) => call.name === message.toolName);
+	let matchIndex = message.toolCallId
+		? state.pendingCalls.findIndex((call) => call.id === message.toolCallId)
+		: -1;
+	if (matchIndex === -1 && message.toolName) {
+		matchIndex = state.pendingCalls.findIndex((call) => call.name === message.toolName);
+	}
 	const matched = state.pendingCalls.splice(matchIndex === -1 ? 0 : matchIndex, 1)[0];
 
 	if (!matched) {
@@ -205,6 +213,19 @@ function appendToolResultPrompt(
 	);
 }
 
+const MAX_CACHE_BREAKPOINTS = 2;
+
+function applyCacheBreakpoints(prompts: DevinPrompt[]): void {
+	let remaining = MAX_CACHE_BREAKPOINTS;
+	for (let i = prompts.length - 1; i >= 0 && remaining > 0; i -= 1) {
+		const source = prompts[i].source;
+		if (source === PROMPT_SOURCE_USER || source === PROMPT_SOURCE_TOOL) {
+			prompts[i].cacheControl = true;
+			remaining -= 1;
+		}
+	}
+}
+
 type TranscriptMessage = { role?: string; content?: unknown; provider?: string; model?: string; toolCallId?: string; toolName?: string };
 
 export function toPrompts(context: TranscriptContext, from?: ModelIdentity): DevinPrompt[] {
@@ -218,8 +239,11 @@ export function toPrompts(context: TranscriptContext, from?: ModelIdentity): Dev
 		else if (message.role === "toolResult") appendToolResultPrompt(prompts, message, state);
 	}
 
-	if (prompts.at(-1)?.source !== PROMPT_SOURCE_USER) {
+	const lastSource = prompts.at(-1)?.source;
+	if (prompts.length === 0 || lastSource === PROMPT_SOURCE_ASSISTANT) {
 		prompts.push(newPrompt(PROMPT_SOURCE_USER, CONTINUATION_CONTENT));
 	}
+
+	applyCacheBreakpoints(prompts);
 	return prompts;
 }

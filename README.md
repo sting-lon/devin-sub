@@ -30,18 +30,18 @@ pi install npm:devin-sub
 ```
 
 The browser opens the Devin consent page. If the browser cannot reach the local
-callback (SSH, container, blocked port), Pi asks you to paste the redirect URL
-instead.
+callback over SSH, inside a container, or behind a blocked port, Pi asks you to
+paste the redirect URL instead.
 
-The token is stored in Pi's credential store. To replace it, run `/login devin`
-again.
+Pi stores the token in its credential store. To replace the token, run
+`/login devin` again.
 
 ## Troubleshooting
 
-- `/model` shows no `devin` entries: run `/login devin` first.
-- Login page opens but nothing happens: paste the full redirect URL when Pi
-  prompts for it.
-- Requests fail with an authentication error: the token was revoked, run
+- If `/model` shows no `devin` entries, run `/login devin` first.
+- If the login page opens and nothing happens, paste the full redirect URL when
+  Pi prompts for it.
+- If requests fail with an authentication error, Devin revoked the token. Run
   `/login devin` again.
 
 ## Uninstall

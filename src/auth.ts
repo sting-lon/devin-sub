@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import type { OAuthCredentials, OAuthLoginCallbacks, ProviderAuthInteraction } from "@earendil-works/pi-ai/compat";
+import type { OAuthCredential, ProviderAuthInteraction } from "@earendil-works/pi-ai";
 import { fetchCatalog, writeCatalogCache } from "./catalog";
 import { API_BASE, APP_BASE, normalizeToken } from "./devin";
 
@@ -12,8 +12,8 @@ const CATALOG_PRIME_TIMEOUT_MS = 10_000;
 const CALLBACK_CODE = /[?&]code=([^&\s]+)/;
 
 const AUTH_INSTRUCTIONS = "Sign in with the Devin account whose subscription Pi should use.";
-const MANUAL_CODE_MESSAGE = "Paste the Devin redirect URL (or the whole callback URL) from the browser";
-const EXCHANGING_MESSAGE = "Exchanging authorization code…";
+const MANUAL_CODE_MESSAGE = "Paste the Devin redirect URL from the browser.";
+const EXCHANGING_MESSAGE = "Exchanging authorization code...";
 const MANUAL_FALLBACK_MESSAGE = "Waiting for the callback failed; paste the redirect URL instead.";
 const CANCELLED_MESSAGE = "Login cancelled";
 const TIMEOUT_MESSAGE = "Devin login timed out after 5 minutes";
@@ -66,11 +66,16 @@ function authorizeUrl(redirectUri: string, state: string, challenge: string): st
 	return `${APP_BASE}/auth/cli/continue?${query}`;
 }
 
-async function exchangeCode(code: string, verifier: string): Promise<{ token: string; webappHost?: string }> {
+async function exchangeCode(
+	code: string,
+	verifier: string,
+	signal?: AbortSignal,
+): Promise<{ token: string; webappHost?: string }> {
 	const response = await fetch(`${API_BASE}/auth/cli/token`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", Accept: "*/*" },
 		body: JSON.stringify({ code, code_verifier: verifier }),
+		signal,
 	});
 
 	if (!response.ok) {
@@ -140,64 +145,48 @@ async function startCallbackServer(expectedState: string, signal?: AbortSignal):
 	return { redirectUri, waitForCode, close: () => server.close() };
 }
 
-async function receiveCode(callbacks: OAuthLoginCallbacks, server: CallbackServer): Promise<string> {
+async function receiveCode(interaction: ProviderAuthInteraction, server: CallbackServer): Promise<string> {
 	try {
 		return await server.waitForCode();
 	} catch (error) {
-		if (callbacks.signal?.aborted) throw new Error(CANCELLED_MESSAGE);
-		if (!callbacks.onManualCodeInput) throw error;
+		if (interaction.signal.aborted) throw new Error(CANCELLED_MESSAGE);
 
-		callbacks.onProgress?.(MANUAL_FALLBACK_MESSAGE);
-		const pasted = await callbacks.onManualCodeInput();
+		interaction.notify({ type: "progress", message: MANUAL_FALLBACK_MESSAGE });
+		const pasted = await interaction.prompt({
+			type: "manual_code",
+			message: MANUAL_CODE_MESSAGE,
+			signal: interaction.signal,
+		});
 		const code = codeFromInput(String(pasted ?? ""));
 		if (!code) throw new Error("No authorization code provided");
 		return code;
 	}
 }
 
-export async function loginDevin(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
+export async function loginDevin(interaction: ProviderAuthInteraction): Promise<OAuthCredential> {
+	interaction.signal.throwIfAborted();
 	const { verifier, challenge } = pkcePair();
 	const state = randomUUID();
-	const server = await startCallbackServer(state, callbacks.signal);
+	const server = await startCallbackServer(state, interaction.signal);
 
-	callbacks.onAuth({ url: authorizeUrl(server.redirectUri, state, challenge), instructions: AUTH_INSTRUCTIONS });
+	interaction.notify({
+		type: "auth_url",
+		url: authorizeUrl(server.redirectUri, state, challenge),
+		instructions: AUTH_INSTRUCTIONS,
+	});
 
 	try {
-		const code = await receiveCode(callbacks, server);
-		callbacks.onProgress?.(EXCHANGING_MESSAGE);
-		const { token } = await exchangeCode(code, verifier);
-		const primed = await fetchCatalog(normalizeToken(token), AbortSignal.timeout(CATALOG_PRIME_TIMEOUT_MS)).catch(
-			() => [],
-		);
+		const code = await receiveCode(interaction, server);
+		interaction.notify({ type: "progress", message: EXCHANGING_MESSAGE });
+		const { token } = await exchangeCode(code, verifier, interaction.signal);
+		const normalized = normalizeToken(token);
+		const primed = await fetchCatalog(
+			normalized,
+			AbortSignal.any([interaction.signal, AbortSignal.timeout(CATALOG_PRIME_TIMEOUT_MS)]),
+		).catch(() => []);
 		if (primed.length > 0) writeCatalogCache(primed);
-		return { access: normalizeToken(token), refresh: token, expires: Date.now() + TOKEN_LIFETIME_MS };
+		return { type: "oauth", access: normalized, refresh: token, expires: Date.now() + TOKEN_LIFETIME_MS };
 	} finally {
 		server.close();
 	}
-}
-
-export function interactionCallbacks(interaction: ProviderAuthInteraction): OAuthLoginCallbacks {
-	return {
-		signal: interaction.signal,
-		onAuth: (info) => interaction.notify({ type: "auth_url", url: info.url, instructions: info.instructions }),
-		onProgress: (message) => interaction.notify({ type: "progress", message }),
-		onManualCodeInput: () => interaction.prompt({ type: "manual_code", message: MANUAL_CODE_MESSAGE }),
-		onDeviceCode: (info) =>
-			interaction.notify({
-				type: "device_code",
-				userCode: info.userCode,
-				verificationUri: info.verificationUri,
-				openBrowserOnConfirm: info.openBrowserOnConfirm,
-				copyCodeOnConfirm: info.copyCodeOnConfirm,
-			}),
-		onPrompt: (prompt) => interaction.prompt({ type: "text", message: prompt.message, placeholder: prompt.placeholder }),
-		onSelect: async (prompt) => {
-			const choice = await interaction.prompt({
-				type: "select",
-				message: prompt.message,
-				options: prompt.options.map((option) => ({ id: option.id, label: option.label })),
-			});
-			return choice || undefined;
-		},
-	};
 }

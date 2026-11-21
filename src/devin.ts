@@ -208,7 +208,7 @@ export function normalizeToken(token: string): string {
 
 export function sentryTrace(): string {
 	const trace = createHash("sha256").update(randomUUID()).digest("hex");
-	return `${trace.slice(0, 32)}-${trace.slice(32, 48)}-1`;
+	return `${trace.slice(0, 32)}-${trace.slice(32, 48)}-0`;
 }
 
 export function buildClientMetadata(token: string): Buffer {
